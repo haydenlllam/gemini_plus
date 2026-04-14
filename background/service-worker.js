@@ -20,6 +20,17 @@ class NLPEngine {
     );
   }
 
+  normalizeUserText(text) {
+    const s = String(text || '').trim();
+    if (!s) return '';
+    return s
+      .replace(/^\s*我说[\s:：-]*/u, '')
+      .replace(/^\s*“我说”[\s:：-]*/u, '')
+      .replace(/^\s*你说[\s:：-]*/u, '')
+      .replace(/^\s*“你说”[\s:：-]*/u, '')
+      .trim();
+  }
+
   /** 分词：返回词频 Map */
   tokenize(text) {
     const freq = new Map();
@@ -94,14 +105,18 @@ class NLPEngine {
     if (!turns.length) return { nodes: [], links: [], totalTurns: 0 };
 
     // 1. 为每轮对话合并文本并分词
-    const docs = turns.map(t => this.tokenize([t.user, t.model, t.thought || ''].join(' ')));
+    const cleanedTurns = turns.map(t => ({
+      ...t,
+      user: this.normalizeUserText(t.user),
+    }));
+    const docs = cleanedTurns.map(t => this.tokenize([t.user, t.model, t.thought || ''].join(' ')));
 
     // 2. 计算 TF-IDF
     const tfidf = this.computeTFIDF(docs);
 
     // 3. 构建节点：每轮对话一个节点
     const latestIdx = turns.length - 1;
-    const nodes = turns.map((t, i) => {
+    const nodes = cleanedTurns.map((t, i) => {
       // 用户消息截取作为标签
       const userText = t.user.trim();
       const label = userText.length > 20 ? userText.slice(0, 18) + '…' : (userText || `Turn ${i + 1}`);
@@ -172,11 +187,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'REQUEST_EXTRACT') {
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-      if (!tabs[0]) return;
-      chrome.tabs.sendMessage(tabs[0].id, { type: 'EXTRACT_CONVERSATION' }, resp => {
-        if (chrome.runtime.lastError || !resp?.turns) return;
+      const tab = tabs[0];
+      if (!tab) {
+        cachedGraph = { nodes: [], links: [], totalTurns: 0, platform: 'unknown', url: '' };
+        chrome.runtime.sendMessage({ type: 'GRAPH_UPDATE', data: cachedGraph }).catch(() => {});
+        return;
+      }
+      chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_CONVERSATION' }, resp => {
+        if (chrome.runtime.lastError || !resp?.turns) {
+          cachedGraph = { nodes: [], links: [], totalTurns: 0, platform: 'unknown', url: tab.url || '' };
+          chrome.runtime.sendMessage({ type: 'GRAPH_UPDATE', data: cachedGraph }).catch(() => {});
+          return;
+        }
         const graphData = nlp.buildGraph(resp.turns);
         graphData.platform = resp.platform || 'gemini';
+        graphData.url = resp.url || tab.url || '';
         cachedGraph = graphData;
         chrome.runtime.sendMessage({ type: 'GRAPH_UPDATE', data: cachedGraph }).catch(() => {});
       });

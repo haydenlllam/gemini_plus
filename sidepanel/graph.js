@@ -36,6 +36,56 @@ function lerpColor(w) {
   return `rgb(${r},${g},${b})`;
 }
 
+function wrapText(ctx, text, maxWidth, maxLines) {
+  const s = String(text || '').trim();
+  if (!s) return [];
+
+  const lines = [];
+  let line = '';
+
+  const pushLine = (l) => {
+    if (l) lines.push(l);
+  };
+
+  const tokens = s.includes(' ') ? s.split(/(\s+)/) : [...s];
+
+  for (const tok of tokens) {
+    const candidate = line ? (line + tok) : tok;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+
+    if (line) {
+      pushLine(line.trimEnd());
+      line = tok.trimStart();
+    } else {
+      let cut = tok.length;
+      while (cut > 1 && ctx.measureText(tok.slice(0, cut) + '…').width > maxWidth) cut--;
+      pushLine(tok.slice(0, cut) + '…');
+      line = '';
+    }
+
+    if (lines.length === maxLines) break;
+  }
+
+  if (lines.length < maxLines && line) pushLine(line.trim());
+
+  if (lines.length > maxLines) lines.length = maxLines;
+  if (lines.length === maxLines) {
+    const joined = lines.join(' ');
+    if (joined.length < s.length) {
+      let last = lines[lines.length - 1];
+      if (!last.endsWith('…')) {
+        while (last.length > 1 && ctx.measureText(last + '…').width > maxWidth) last = last.slice(0, -1);
+        lines[lines.length - 1] = last + '…';
+      }
+    }
+  }
+
+  return lines;
+}
+
 /* ══════════════════════════════════════
    ForceGraph
    ══════════════════════════════════════ */
@@ -98,18 +148,22 @@ class ForceGraph {
 
     this.nodeMap.clear();
     const N = graphData.nodes.length;
+    const baseW = Number.isFinite(this.W) && this.W > 0 ? this.W : 360;
+    const baseH = Number.isFinite(this.H) && this.H > 0 ? this.H : 520;
 
     this.nodes = graphData.nodes.map((n, i) => {
       const old = oldPos.get(n.id);
       // 圆环初始布局，按对话顺序排列
       const angle = (i / N) * Math.PI * 2 - Math.PI / 2;
-      const spread = Math.min(this.W, this.H) * 0.3;
+      const spread = Math.max(140, Math.min(baseW, baseH) * 0.35);
       const r = Math.max(16, Math.min(28, 14 + (n.wordCount || 100) / 200));
+      const hasOld = old && Number.isFinite(old.x) && Number.isFinite(old.y);
+      const jitter = 10;
 
       const node = {
         ...n,
-        x:  old ? old.x : Math.cos(angle) * spread,
-        y:  old ? old.y : Math.sin(angle) * spread,
+        x:  hasOld ? old.x : (Math.cos(angle) * spread + (Math.random() - 0.5) * jitter),
+        y:  hasOld ? old.y : (Math.sin(angle) * spread + (Math.random() - 0.5) * jitter),
         vx: 0, vy: 0,
         r,
       };
@@ -141,12 +195,46 @@ class ForceGraph {
         let dx = nodes[j].x - nodes[i].x;
         let dy = nodes[j].y - nodes[i].y;
         let d2 = dx * dx + dy * dy;
+        if (!Number.isFinite(d2)) {
+          dx = (Math.random() - 0.5) * 0.01;
+          dy = (Math.random() - 0.5) * 0.01;
+          d2 = dx * dx + dy * dy;
+        }
+        if (d2 < 1e-6) {
+          dx = (Math.random() - 0.5) * 0.01;
+          dy = (Math.random() - 0.5) * 0.01;
+          d2 = dx * dx + dy * dy;
+        }
         if (d2 < 1) d2 = 1;
         const f = repStr * this.alpha / d2;
         nodes[i].vx -= dx * f;
         nodes[i].vy -= dy * f;
         nodes[j].vx += dx * f;
         nodes[j].vy += dy * f;
+      }
+    }
+
+    const pad = 10;
+    const labelExtra = 18;
+    for (let i = 0; i < N; i++) {
+      for (let j = i + 1; j < N; j++) {
+        let dx = nodes[j].x - nodes[i].x;
+        let dy = nodes[j].y - nodes[i].y;
+        let d = Math.sqrt(dx * dx + dy * dy);
+        if (!Number.isFinite(d)) continue;
+        const minD = (nodes[i].r + labelExtra) + (nodes[j].r + labelExtra) + pad;
+        if (d < 1e-6) {
+          dx = (Math.random() - 0.5) * 0.5;
+          dy = (Math.random() - 0.5) * 0.5;
+          d = Math.sqrt(dx * dx + dy * dy) || 1;
+        }
+        if (d < minD) {
+          const push = ((minD - d) / d) * 0.5 * this.alpha;
+          const px = dx * push;
+          const py = dy * push;
+          nodes[i].vx -= px; nodes[i].vy -= py;
+          nodes[j].vx += px; nodes[j].vy += py;
+        }
       }
     }
 
@@ -260,20 +348,17 @@ class ForceGraph {
       ctx.fillText(`${n.turnIndex + 1}`, n.x, n.y);
 
       // Label below: user question preview
-      const fontSize = 10;
+      const fontSize = 11;
+      const lineGap = 3;
       ctx.font = `500 ${fontSize}px system-ui, -apple-system, sans-serif`;
       ctx.fillStyle = n.isLatest || isSel || isHov ? COLORS.text : COLORS.textDim;
 
-      // 多行文本截断显示
-      const maxLabelWidth = 100;
-      const label = n.label;
-      let displayLabel = label;
-      if (ctx.measureText(label).width > maxLabelWidth) {
-        let cut = label.length;
-        while (cut > 0 && ctx.measureText(label.slice(0, cut) + '…').width > maxLabelWidth) cut--;
-        displayLabel = label.slice(0, cut) + '…';
+      const maxLabelWidth = 160;
+      const lines = wrapText(ctx, n.label, maxLabelWidth, 2);
+      const baseY = n.y + n.r + fontSize + 4;
+      for (let li = 0; li < lines.length; li++) {
+        ctx.fillText(lines[li], n.x, baseY + li * (fontSize + lineGap));
       }
-      ctx.fillText(displayLabel, n.x, n.y + n.r + fontSize + 4);
     }
 
     ctx.restore();
@@ -310,7 +395,7 @@ class ForceGraph {
     // Zoom
     c.addEventListener('wheel', e => {
       e.preventDefault();
-      this.scale = Math.max(0.15, Math.min(6, this.scale * (e.deltaY > 0 ? 0.92 : 1.08)));
+      this.scale = Math.max(0.15, Math.min(1, this.scale * (e.deltaY > 0 ? 0.92 : 1.08)));
     }, { passive: false });
 
     // Pointer down
@@ -397,7 +482,7 @@ class ForceGraph {
     }
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     const span = Math.max(maxX - minX, maxY - minY, 100);
-    const ts = Math.max(0.4, Math.min(2.5, Math.min(this.W, this.H) / (span + 200)));
+    const ts = Math.max(0.4, Math.min(1, Math.min(this.W, this.H) / (span + 200)));
 
     const s0 = { tx: this.tx, ty: this.ty, s: this.scale };
     const s1 = { tx: -cx * ts, ty: -cy * ts, s: ts };
