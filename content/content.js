@@ -1,77 +1,205 @@
 /**
- * Gemini Knowledge Graph — Content Script
- * 从 Gemini 页面 DOM 中提取多轮对话内容，并通过 MutationObserver 实时监听增量更新
+ * Conversation Knowledge Graph — Content Script
+ * Multi-platform support: Gemini + Qianwen (通义千问)
+ * Extract conversation turns from DOM, support MutationObserver incremental updates
+ * and Side Panel initiated "scroll to specific turn"
  */
 (() => {
   'use strict';
 
-  /* ── Gemini DOM 选择器（多级 fallback） ── */
-  const SEL = {
-    container:    '.conversation-container, infinite-scroller, #chat-history',
-    userQuery:    'user-query, USER-QUERY',
-    userText:     '.query-text-line, .query-text p, .query-text',
-    modelResp:    'model-response, MODEL-RESPONSE',
-    modelContent: '.model-response-text .markdown, .response-container-content .markdown, message-content .markdown',
-    modelThought: 'model-thoughts .thoughts-body, model-thoughts .thoughts-content',
-    scroller:     '.chat-scrollable-container, .chat-history-scroll-container, infinite-scroller, main',
+  /* ══════════════════════════════════════
+     Platform Detection
+     ══════════════════════════════════════ */
+  function detectPlatform() {
+    const host = location.hostname;
+    if (host.includes('gemini.google.com')) return 'gemini';
+    if (host.includes('qianwen.com') || host.includes('qwen.ai') || host.includes('tongyi.aliyun.com')) return 'qianwen';
+    return 'unknown';
+  }
+
+  const PLATFORM = detectPlatform();
+
+  /* ══════════════════════════════════════
+     Platform-specific DOM Selectors
+     ══════════════════════════════════════ */
+  const SELECTORS = {
+    gemini: {
+      container:    '.conversation-container, infinite-scroller, #chat-history',
+      userMsg:      'user-query, USER-QUERY',
+      userText:     '.query-text-line, .query-text p, .query-text',
+      modelMsg:     'model-response, MODEL-RESPONSE',
+      modelText:    '.model-response-text .markdown, .response-container-content .markdown, message-content .markdown',
+      modelThought: 'model-thoughts .thoughts-body, model-thoughts .thoughts-content',
+      scroller:     '.chat-scrollable-container, .chat-history-scroll-container, infinite-scroller, main',
+    },
+    qianwen: {
+      container:    '.conversation-list, .chat-container, .message-list, .dialogue-container, main',
+      userMsg:      '.user-content, .message-user, .user-message, [class*="user-content"], [class*="userMessage"], [class*="message-user"]',
+      userText:     '.user-content p, .message-user p, .user-message p, [class*="user-content"] p, .user-content, .message-user, .user-message',
+      modelMsg:     '.ai-content, .message-assistant, .bot-message, .assistant-message, [class*="assistant-content"], [class*="message-assistant"], [class*="bot-message"]',
+      modelText:    '.ai-content p, .message-assistant p, .bot-message p, .assistant-message p, [class*="assistant-content"] p, [class*="message-assistant"] p, .ai-content, .message-assistant, .bot-message, .assistant-message',
+      modelThought: '',
+      scroller:     '.chat-container, .message-list, main, .dialogue-scroll-container',
+    },
   };
 
-  /** 查找第一个匹配的元素（支持逗号分隔的多选择器） */
+  const SEL = SELECTORS[PLATFORM] || SELECTORS.gemini;
+
   function q(parent, selectors) {
     for (const s of selectors.split(',')) {
-      const el = parent.querySelector(s.trim());
-      if (el) return el;
+      const trimmed = s.trim();
+      if (!trimmed) continue;
+      try {
+        const el = parent.querySelector(trimmed);
+        if (el) return el;
+      } catch (e) { /* skip invalid selectors */ }
     }
     return null;
   }
 
-  /** 提取单个元素的纯文本，限制长度 */
-  function textOf(el, maxLen = 5000) {
-    if (!el) return '';
-    const t = el.innerText || el.textContent || '';
-    return t.trim().slice(0, maxLen);
+  function qAll(parent, selectors) {
+    const results = [];
+    for (const s of selectors.split(',')) {
+      const trimmed = s.trim();
+      if (!trimmed) continue;
+      try {
+        parent.querySelectorAll(trimmed).forEach(el => results.push(el));
+      } catch (e) { /* skip invalid selectors */ }
+    }
+    return results;
   }
 
-  /* ── 核心：提取全部对话轮次 ── */
+  function textOf(el, maxLen = 5000) {
+    if (!el) return '';
+    return (el.innerText || el.textContent || '').trim().slice(0, maxLen);
+  }
+
+  /* ══════════════════════════════════════
+     Extract Conversation — Platform-aware
+     ══════════════════════════════════════ */
+  let turnElements = [];   // cached DOM element refs for scroll-to
+
   function extractConversation() {
     const root = q(document, SEL.container) || document.body;
-    const userEls  = root.querySelectorAll(SEL.userQuery);
-    const modelEls = root.querySelectorAll(SEL.modelResp);
-    const len = Math.max(userEls.length, modelEls.length);
     const turns = [];
+    turnElements = [];
 
-    for (let i = 0; i < len; i++) {
-      const turn = { index: i, user: '', model: '', thought: '' };
+    if (PLATFORM === 'gemini') {
+      // Gemini: use existing extraction
+      const userEls  = root.querySelectorAll(SEL.userMsg);
+      const modelEls = root.querySelectorAll(SEL.modelMsg);
+      const len = Math.max(userEls.length, modelEls.length);
 
-      if (i < userEls.length) {
-        turn.user = textOf(q(userEls[i], SEL.userText) || userEls[i]);
+      for (let i = 0; i < len; i++) {
+        const turn = { index: i, user: '', model: '', thought: '' };
+        if (i < userEls.length) {
+          turn.user = textOf(q(userEls[i], SEL.userText) || userEls[i]);
+          turnElements[i] = userEls[i];
+        } else if (i < modelEls.length) {
+          turnElements[i] = modelEls[i];
+        }
+        if (i < modelEls.length) {
+          turn.model   = textOf(q(modelEls[i], SEL.modelText) || modelEls[i]);
+          turn.thought = textOf(q(modelEls[i], SEL.modelThought));
+        }
+        if (turn.user || turn.model) turns.push(turn);
       }
-      if (i < modelEls.length) {
-        turn.model   = textOf(q(modelEls[i], SEL.modelContent) || modelEls[i]);
-        turn.thought = textOf(q(modelEls[i], SEL.modelThought));
+    } else if (PLATFORM === 'qianwen') {
+      // Qianwen: detect by role order
+      const userEls  = qAll(root, SEL.userMsg);
+      const modelEls = qAll(root, SEL.modelMsg);
+
+      // Merge by document order
+      const allMessages = [...userEls, ...modelEls]
+        .map(el => ({ el, sourceType: userEls.includes(el) ? 'user' : 'model', offset: getOffset(el) }))
+        .sort((a, b) => a.offset - b.offset);
+
+      // Group into turns: user + following model = one turn
+      let currentTurn = null;
+      let turnIndex = 0;
+
+      for (const msg of allMessages) {
+        if (msg.sourceType === 'user') {
+          if (currentTurn) {
+            if (currentTurn.user || currentTurn.model) {
+              turns.push(currentTurn);
+              turnIndex++;
+            }
+          }
+          currentTurn = { index: turnIndex, user: '', model: '', thought: '' };
+          currentTurn.user = textOf(q(msg.el, SEL.userText) || msg.el);
+          turnElements[turnIndex] = msg.el;
+        } else if (msg.sourceType === 'model' && currentTurn) {
+          currentTurn.model = textOf(q(msg.el, SEL.modelText) || msg.el);
+          // Prefer the model element for navigation
+          if (!turnElements[currentTurn.index]) turnElements[currentTurn.index] = msg.el;
+        }
       }
-      if (turn.user || turn.model) turns.push(turn);
+      if (currentTurn && (currentTurn.user || currentTurn.model)) {
+        turns.push(currentTurn);
+      }
     }
+
     return turns;
   }
 
-  /* ── 发送到 Service Worker ── */
+  // Helper: get vertical offset for DOM ordering
+  function getOffset(el) {
+    try {
+      return el.getBoundingClientRect().top;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /* ══════════════════════════════════════
+     Scroll to Turn + Highlight
+     ══════════════════════════════════════ */
+  function scrollToTurn(turnIndex) {
+    const el = turnElements[turnIndex];
+    if (!el) return false;
+
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    el.style.transition = 'outline 0.2s, outline-offset 0.2s';
+    el.style.outline = '2px solid #f59e0b';
+    el.style.outlineOffset = '4px';
+    el.style.borderRadius = '8px';
+    setTimeout(() => {
+      el.style.outline = '2px solid transparent';
+      setTimeout(() => {
+        el.style.outline = '2px solid #f59e0b';
+        setTimeout(() => {
+          el.style.outline = '';
+          el.style.outlineOffset = '';
+          el.style.borderRadius = '';
+          el.style.transition = '';
+        }, 600);
+      }, 300);
+    }, 600);
+    return true;
+  }
+
+  /* ══════════════════════════════════════
+     Push Updates
+     ══════════════════════════════════════ */
   let lastHash = '';
 
   function pushUpdate() {
     const turns = extractConversation();
-    // 简单哈希防止重复推送
     const hash = turns.map(t => t.user.slice(0, 40) + t.model.slice(0, 40)).join('|');
     if (hash === lastHash) return;
     lastHash = hash;
 
     chrome.runtime.sendMessage({
       type: 'CONVERSATION_UPDATE',
-      data: { turns, url: location.href, timestamp: Date.now() },
+      data: { turns, platform: PLATFORM, url: location.href, timestamp: Date.now() },
     }).catch(() => {});
   }
 
-  /* ── MutationObserver：增量监听 ── */
+  /* ══════════════════════════════════════
+     MutationObserver
+     ══════════════════════════════════════ */
   let debounceTimer = null;
 
   function startObserver() {
@@ -83,17 +211,31 @@
     observer.observe(target, { childList: true, subtree: true });
   }
 
-  /* ── 响应来自 Service Worker / Side Panel 的请求 ── */
+  /* ══════════════════════════════════════
+     Message Listeners
+     ══════════════════════════════════════ */
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'EXTRACT_CONVERSATION') {
-      sendResponse({ turns: extractConversation() });
+      sendResponse({ turns: extractConversation(), platform: PLATFORM });
+    }
+    if (msg.type === 'SCROLL_TO_TURN') {
+      extractConversation();
+      const ok = scrollToTurn(msg.turnIndex);
+      sendResponse({ ok });
     }
     return true;
   });
 
-  /* ── 初始化 ── */
-  setTimeout(() => {
-    pushUpdate();
-    startObserver();
-  }, 1500);
+  /* ══════════════════════════════════════
+     Initialize
+     ══════════════════════════════════════ */
+  if (PLATFORM === 'unknown') {
+    console.log('[ConvGraph] Unsupported platform:', location.hostname);
+  } else {
+    console.log('[ConvGraph] Platform detected:', PLATFORM);
+    setTimeout(() => {
+      pushUpdate();
+      startObserver();
+    }, 1500);
+  }
 })();

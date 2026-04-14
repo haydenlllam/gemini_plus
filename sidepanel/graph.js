@@ -1,8 +1,9 @@
 /**
  * Gemini Knowledge Graph — Force-Directed Graph (Canvas, zero dependencies)
  *
- * 力导向图可视化引擎，纯 Canvas 渲染，不依赖 D3。
- * 支持：缩放 / 平移 / 拖拽 / 点击选中 / 最新对话高亮 / 自动聚焦
+ * 重构版：每个节点 = 一轮对话，标签 = 用户提问
+ * 边 = 对话内容关联度（TF-IDF 余弦相似度）
+ * 点击节点 → 定位 Gemini 页面对应位置
  */
 'use strict';
 
@@ -10,58 +11,70 @@
    Color palette
    ══════════════════════════════════════ */
 const COLORS = {
-  concept:   { fill: '#3b82f6', glow: '#3b82f680' },
-  entity:    { fill: '#10b981', glow: '#10b98180' },
-  technical: { fill: '#a78bfa', glow: '#a78bfa80' },
-  latest:    { ring: '#f59e0b', glow: '#f59e0b60' },
-  link:      '#334155',
-  linkLatest:'#f59e0b50',
-  text:      '#e2e8f0',
-  textDim:   '#94a3b8',
-  bg:        '#0f1117',
-  selected:  '#ffffff',
+  node:       '#3b82f6',
+  nodeHover:  '#2563eb',
+  latest:     { fill: '#f59e0b', glow: '#f59e0b30', ring: '#f59e0b' },
+  selected:   '#1e293b',
+  linkWeak:   '#cbd5e1',
+  linkMed:    '#94a3b8',
+  linkStrong: '#3b82f6',
+  linkAdj:    '#94a3b8',
+  text:       '#1e293b',
+  textDim:    '#64748b',
+  turnBadge:  '#ffffff',
+  turnText:   '#64748b',
 };
 
 /* ══════════════════════════════════════
-   Force Simulation
+   Utility: 渐变色插值
+   ══════════════════════════════════════ */
+function lerpColor(w) {
+  // w: 0~1 → 浅色主题：从浅灰蓝到鲜明蓝色
+  const r = Math.round(148 - w * 89);   // 148→59  (#94→#3b)
+  const g = Math.round(163 - w * 33);   // 163→130 (#a3→#82)
+  const b = Math.round(184 + w * 62);   // 184→246 (#b8→#f6)
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ══════════════════════════════════════
+   ForceGraph
    ══════════════════════════════════════ */
 class ForceGraph {
   constructor(canvasEl) {
-    this.canvas  = canvasEl;
-    this.ctx     = canvasEl.getContext('2d');
-    this.dpr     = window.devicePixelRatio || 1;
+    this.canvas = canvasEl;
+    this.ctx    = canvasEl.getContext('2d');
+    this.dpr    = window.devicePixelRatio || 1;
 
-    // Data
     this.nodes   = [];
     this.links   = [];
-    this.nodeMap  = new Map();
+    this.nodeMap = new Map();
 
-    // Simulation
-    this.alpha      = 1;
-    this.alphaMin   = 0.005;
-    this.alphaDecay = 0.018;
-    this.velocityDecay = 0.55;
+    // Simulation params
+    this.alpha        = 1;
+    this.alphaMin     = 0.004;
+    this.alphaDecay   = 0.015;
+    this.velocityDecay = 0.5;
 
     // View transform
     this.tx = 0; this.ty = 0; this.scale = 1;
 
-    // Interaction state
-    this.pointer     = { x: 0, y: 0 };
-    this.hovered     = null;
-    this.selected    = null;
-    this.dragging    = null;
-    this.isPanning   = false;
-    this.panStart    = null;
+    // Interaction
+    this.hovered  = null;
+    this.selected = null;
+    this.dragging = null;
+    this.dragMoved = false;
+    this.isPanning = false;
+    this.panStart  = null;
 
-    this._raf = null;
     this._tick = 0;
+    this.onSelect   = null;   // callback(node|null)
+    this.onNavigate = null;   // callback(turnIndex)
 
     this.resize();
     this._bindEvents();
     this._loop();
   }
 
-  /* ── Canvas sizing ── */
   resize() {
     const rect = this.canvas.parentElement.getBoundingClientRect();
     this.W = rect.width;
@@ -73,51 +86,47 @@ class ForceGraph {
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
-  /* ══════════════════════════════════
-     Data ingestion
-     ══════════════════════════════════ */
+  /* ═══════════════ Data ═══════════════ */
   setData(graphData) {
     if (!graphData || !graphData.nodes.length) {
-      this.nodes = [];
-      this.links = [];
-      this.nodeMap.clear();
+      this.nodes = []; this.links = []; this.nodeMap.clear();
       return;
     }
 
-    const oldPositions = new Map();
-    this.nodes.forEach(n => oldPositions.set(n.id, { x: n.x, y: n.y }));
+    const oldPos = new Map();
+    this.nodes.forEach(n => oldPos.set(n.id, { x: n.x, y: n.y }));
 
-    // Build node objects
     this.nodeMap.clear();
-    this.nodes = graphData.nodes.map(n => {
-      const old = oldPositions.get(n.id);
-      const radius = Math.max(6, Math.min(22, 4 + n.weight * 1.5));
+    const N = graphData.nodes.length;
+
+    this.nodes = graphData.nodes.map((n, i) => {
+      const old = oldPos.get(n.id);
+      // 圆环初始布局，按对话顺序排列
+      const angle = (i / N) * Math.PI * 2 - Math.PI / 2;
+      const spread = Math.min(this.W, this.H) * 0.3;
+      const r = Math.max(16, Math.min(28, 14 + (n.wordCount || 100) / 200));
+
       const node = {
         ...n,
-        x:  old ? old.x : (Math.random() - 0.5) * this.W * 0.6,
-        y:  old ? old.y : (Math.random() - 0.5) * this.H * 0.6,
-        vx: 0,
-        vy: 0,
-        r:  radius,
+        x:  old ? old.x : Math.cos(angle) * spread,
+        y:  old ? old.y : Math.sin(angle) * spread,
+        vx: 0, vy: 0,
+        r,
       };
       this.nodeMap.set(n.id, node);
       return node;
     });
 
-    // Build link objects with node references
     this.links = graphData.links.map(l => ({
       ...l,
       sourceNode: this.nodeMap.get(l.source),
       targetNode: this.nodeMap.get(l.target),
     })).filter(l => l.sourceNode && l.targetNode);
 
-    // Restart simulation
-    this.alpha = 0.8;
+    this.alpha = 0.85;
   }
 
-  /* ══════════════════════════════════
-     Force simulation tick
-     ══════════════════════════════════ */
+  /* ═══════════════ Simulation ═══════════════ */
   _simulate() {
     if (this.alpha < this.alphaMin) return;
 
@@ -125,8 +134,8 @@ class ForceGraph {
     const links = this.links;
     const N = nodes.length;
 
-    // ── 1. Repulsion (Barnes-Hut simplified: pairwise for small N)
-    const repStr = 800;
+    // 1. Repulsion
+    const repStr = 1200;
     for (let i = 0; i < N; i++) {
       for (let j = i + 1; j < N; j++) {
         let dx = nodes[j].x - nodes[i].x;
@@ -134,89 +143,88 @@ class ForceGraph {
         let d2 = dx * dx + dy * dy;
         if (d2 < 1) d2 = 1;
         const f = repStr * this.alpha / d2;
-        const fx = dx * f;
-        const fy = dy * f;
-        nodes[i].vx -= fx;
-        nodes[i].vy -= fy;
-        nodes[j].vx += fx;
-        nodes[j].vy += fy;
+        nodes[i].vx -= dx * f;
+        nodes[i].vy -= dy * f;
+        nodes[j].vx += dx * f;
+        nodes[j].vy += dy * f;
       }
     }
 
-    // ── 2. Attraction along links (spring)
-    const springLen = 100;
-    const springStr = 0.06;
+    // 2. Attraction — 弹簧长度与相似度成反比（越相似越近）
     for (const l of links) {
       const s = l.sourceNode, t = l.targetNode;
-      let dx = t.x - s.x;
-      let dy = t.y - s.y;
+      let dx = t.x - s.x, dy = t.y - s.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const f = (d - springLen) * springStr * this.alpha;
-      const fx = (dx / d) * f;
-      const fy = (dy / d) * f;
-      s.vx += fx;
-      s.vy += fy;
-      t.vx -= fx;
-      t.vy -= fy;
+      const targetLen = l.isAdjacent ? 120 : (200 - l.weight * 150);  // 高相似度 → 短弹簧
+      const str = l.isAdjacent ? 0.08 : (0.03 + l.weight * 0.05);
+      const f = (d - targetLen) * str * this.alpha;
+      const fx = (dx / d) * f, fy = (dy / d) * f;
+      s.vx += fx; s.vy += fy;
+      t.vx -= fx; t.vy -= fy;
     }
 
-    // ── 3. Center gravity
-    const cx = 0, cy = 0, grav = 0.02;
+    // 3. Center gravity
     for (const n of nodes) {
-      n.vx += (cx - n.x) * grav * this.alpha;
-      n.vy += (cy - n.y) * grav * this.alpha;
+      n.vx += -n.x * 0.015 * this.alpha;
+      n.vy += -n.y * 0.015 * this.alpha;
     }
 
-    // ── 4. Integrate & dampen
+    // 4. Integrate
     for (const n of nodes) {
       if (n === this.dragging) continue;
       n.vx *= this.velocityDecay;
       n.vy *= this.velocityDecay;
-      n.x  += n.vx;
-      n.y  += n.vy;
+      n.x += n.vx;
+      n.y += n.vy;
     }
 
     this.alpha *= (1 - this.alphaDecay);
   }
 
-  /* ══════════════════════════════════
-     Render
-     ══════════════════════════════════ */
+  /* ═══════════════ Render ═══════════════ */
   _render() {
     const ctx = this.ctx;
-    const W = this.W, H = this.H;
-
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, this.W, this.H);
     ctx.save();
-    ctx.translate(W / 2 + this.tx, H / 2 + this.ty);
+    ctx.translate(this.W / 2 + this.tx, this.H / 2 + this.ty);
     ctx.scale(this.scale, this.scale);
 
     const pulse = 0.5 + 0.5 * Math.sin(this._tick * 0.04);
 
-    // ── Links
+    // ── Links ──
     for (const l of this.links) {
       const s = l.sourceNode, t = l.targetNode;
-      const isHL = (this.selected && (s.id === this.selected.id || t.id === this.selected.id));
+      const isHL = this.selected && (s.id === this.selected.id || t.id === this.selected.id);
+      const w = l.weight;
+
       ctx.beginPath();
       ctx.moveTo(s.x, s.y);
       ctx.lineTo(t.x, t.y);
-      ctx.strokeStyle = l.isLatest ? COLORS.linkLatest : COLORS.link;
-      ctx.lineWidth   = isHL ? Math.min(l.weight, 4) + 1 : Math.min(l.weight, 3) * 0.6;
-      ctx.globalAlpha = isHL ? 0.9 : (l.isLatest ? 0.5 : 0.2);
+
+      if (isHL) {
+        ctx.strokeStyle = lerpColor(Math.min(w * 2, 1));
+        ctx.lineWidth = 1.5 + w * 3;
+        ctx.globalAlpha = 0.9;
+      } else {
+        ctx.strokeStyle = l.isAdjacent ? COLORS.linkAdj : lerpColor(w);
+        ctx.lineWidth = l.isAdjacent ? 1 : (0.8 + w * 3);
+        ctx.globalAlpha = l.isAdjacent ? 0.5 : (0.4 + w * 0.5);
+      }
+      if (l.isAdjacent && !isHL) ctx.setLineDash([4, 4]);
       ctx.stroke();
+      ctx.setLineDash([]);
     }
     ctx.globalAlpha = 1;
 
-    // ── Nodes
+    // ── Nodes ──
     for (const n of this.nodes) {
-      const c = COLORS[n.type] || COLORS.concept;
       const isHov = this.hovered === n;
       const isSel = this.selected === n;
 
-      // Latest glow ring (pulsing)
+      // Latest glow
       if (n.isLatest) {
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r + 5 + pulse * 3, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, n.r + 6 + pulse * 4, 0, Math.PI * 2);
         ctx.fillStyle = COLORS.latest.glow;
         ctx.fill();
       }
@@ -224,19 +232,18 @@ class ForceGraph {
       // Selection ring
       if (isSel) {
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2);
         ctx.strokeStyle = COLORS.selected;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.5;
         ctx.stroke();
       }
 
-      // Node circle
+      // Main circle
       ctx.beginPath();
       ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-      ctx.fillStyle = isHov ? '#ffffff' : c.fill;
+      ctx.fillStyle = n.isLatest ? COLORS.latest.fill : (isHov ? COLORS.nodeHover : COLORS.node);
       ctx.fill();
 
-      // Latest inner ring
       if (n.isLatest) {
         ctx.beginPath();
         ctx.arc(n.x, n.y, n.r + 1, 0, Math.PI * 2);
@@ -245,29 +252,41 @@ class ForceGraph {
         ctx.stroke();
       }
 
-      // Label
-      const fontSize = Math.max(9, Math.min(13, n.r * 0.85));
-      ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
+      // Turn number badge inside circle
+      ctx.font = `700 ${Math.max(9, n.r * 0.65)}px system-ui, -apple-system, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(`${n.turnIndex + 1}`, n.x, n.y);
+
+      // Label below: user question preview
+      const fontSize = 10;
+      ctx.font = `500 ${fontSize}px system-ui, -apple-system, sans-serif`;
       ctx.fillStyle = n.isLatest || isSel || isHov ? COLORS.text : COLORS.textDim;
-      ctx.fillText(n.label, n.x, n.y + n.r + fontSize + 2);
+
+      // 多行文本截断显示
+      const maxLabelWidth = 100;
+      const label = n.label;
+      let displayLabel = label;
+      if (ctx.measureText(label).width > maxLabelWidth) {
+        let cut = label.length;
+        while (cut > 0 && ctx.measureText(label.slice(0, cut) + '…').width > maxLabelWidth) cut--;
+        displayLabel = label.slice(0, cut) + '…';
+      }
+      ctx.fillText(displayLabel, n.x, n.y + n.r + fontSize + 4);
     }
 
     ctx.restore();
     this._tick++;
   }
 
-  /* ── Animation loop ── */
   _loop() {
     this._simulate();
     this._render();
-    this._raf = requestAnimationFrame(() => this._loop());
+    requestAnimationFrame(() => this._loop());
   }
 
-  /* ══════════════════════════════════
-     Interaction
-     ══════════════════════════════════ */
+  /* ═══════════════ Interaction ═══════════════ */
   _screenToWorld(sx, sy) {
     return {
       x: (sx - this.W / 2 - this.tx) / this.scale,
@@ -279,151 +298,140 @@ class ForceGraph {
     for (let i = this.nodes.length - 1; i >= 0; i--) {
       const n = this.nodes[i];
       const dx = n.x - wx, dy = n.y - wy;
-      if (dx * dx + dy * dy <= (n.r + 4) ** 2) return n;
+      if (dx * dx + dy * dy <= (n.r + 5) ** 2) return n;
     }
     return null;
   }
 
   _bindEvents() {
     const c = this.canvas;
+    new ResizeObserver(() => this.resize()).observe(c.parentElement);
 
-    /* Resize */
-    const ro = new ResizeObserver(() => this.resize());
-    ro.observe(c.parentElement);
-
-    /* Wheel → zoom */
+    // Zoom
     c.addEventListener('wheel', e => {
       e.preventDefault();
-      const factor = e.deltaY > 0 ? 0.92 : 1.08;
-      this.scale = Math.max(0.15, Math.min(6, this.scale * factor));
+      this.scale = Math.max(0.15, Math.min(6, this.scale * (e.deltaY > 0 ? 0.92 : 1.08)));
     }, { passive: false });
 
-    /* Pointer down */
+    // Pointer down
     c.addEventListener('pointerdown', e => {
       const rect = c.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
-      const { x: wx, y: wy } = this._screenToWorld(sx, sy);
-      const hit = this._hitTest(wx, wy);
+      const { x, y } = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const hit = this._hitTest(x, y);
 
+      this.dragMoved = false;
       if (hit) {
         this.dragging = hit;
-        this.alpha = Math.max(this.alpha, 0.3);  // reheat
-        c.setPointerCapture(e.pointerId);
+        this.alpha = Math.max(this.alpha, 0.3);
       } else {
         this.isPanning = true;
         this.panStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
-        c.setPointerCapture(e.pointerId);
       }
+      c.setPointerCapture(e.pointerId);
     });
 
-    /* Pointer move */
+    // Pointer move
     c.addEventListener('pointermove', e => {
       const rect = c.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
+      const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
       if (this.dragging) {
         const { x, y } = this._screenToWorld(sx, sy);
-        this.dragging.x = x;
-        this.dragging.y = y;
-        this.dragging.vx = 0;
-        this.dragging.vy = 0;
+        this.dragging.x = x; this.dragging.y = y;
+        this.dragging.vx = 0; this.dragging.vy = 0;
         this.alpha = Math.max(this.alpha, 0.15);
+        this.dragMoved = true;
       } else if (this.isPanning && this.panStart) {
         this.tx = this.panStart.tx + (e.clientX - this.panStart.x);
         this.ty = this.panStart.ty + (e.clientY - this.panStart.y);
       } else {
-        // Hover detection
-        const { x: wx, y: wy } = this._screenToWorld(sx, sy);
-        this.hovered = this._hitTest(wx, wy);
+        const { x, y } = this._screenToWorld(sx, sy);
+        this.hovered = this._hitTest(x, y);
         c.style.cursor = this.hovered ? 'pointer' : 'grab';
       }
     });
 
-    /* Pointer up */
-    c.addEventListener('pointerup', e => {
-      if (this.dragging) {
-        // If barely moved → treat as click (select)
-        this.dragging = null;
-      }
-      if (this.isPanning) {
-        this.isPanning = false;
-        this.panStart = null;
+    // Pointer up
+    c.addEventListener('pointerup', () => {
+      this.dragging = null;
+      this.isPanning = false;
+      this.panStart = null;
+    });
+
+    // Click → select + navigate
+    c.addEventListener('click', e => {
+      const rect = c.getBoundingClientRect();
+      const { x, y } = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const hit = this._hitTest(x, y);
+
+      if (hit && !this.dragMoved) {
+        this.selected = hit;
+        if (this.onSelect) this.onSelect(hit);
+        // 触发导航：定位到 Gemini 对话
+        if (this.onNavigate) this.onNavigate(hit.turnIndex);
+      } else if (!hit) {
+        this.selected = null;
+        if (this.onSelect) this.onSelect(null);
       }
     });
 
-    /* Click → select node */
-    c.addEventListener('click', e => {
+    // Double click → focus node
+    c.addEventListener('dblclick', e => {
       const rect = c.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
-      const { x: wx, y: wy } = this._screenToWorld(sx, sy);
-      const hit = this._hitTest(wx, wy);
-      this.selected = hit;
-      if (this.onSelect) this.onSelect(hit);
+      const { x, y } = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const hit = this._hitTest(x, y);
+      if (hit) this.focusNodes(new Set([hit.id]));
     });
   }
 
-  /* ══════════════════════════════════
-     Public helpers
-     ══════════════════════════════════ */
+  /* ═══════════════ Public ═══════════════ */
 
-  /** 平滑聚焦到一组节点 */
-  focusNodes(nodeIds) {
-    const targets = this.nodes.filter(n => nodeIds.has(n.id));
+  focusNodes(ids) {
+    const targets = this.nodes.filter(n => ids.has(n.id));
     if (!targets.length) return;
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const n of targets) {
-      if (n.x < minX) minX = n.x;
-      if (n.x > maxX) maxX = n.x;
-      if (n.y < minY) minY = n.y;
-      if (n.y > maxY) maxY = n.y;
+      minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+      minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
     }
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     const span = Math.max(maxX - minX, maxY - minY, 100);
-    const targetScale = Math.min(this.W, this.H) / (span + 160);
-    const clampedScale = Math.max(0.4, Math.min(3, targetScale));
+    const ts = Math.max(0.4, Math.min(2.5, Math.min(this.W, this.H) / (span + 200)));
 
-    // Animate
-    const startTx = this.tx, startTy = this.ty, startS = this.scale;
-    const endTx = -cx * clampedScale, endTy = -cy * clampedScale, endS = clampedScale;
-    const dur = 500;
-    const t0 = performance.now();
+    const s0 = { tx: this.tx, ty: this.ty, s: this.scale };
+    const s1 = { tx: -cx * ts, ty: -cy * ts, s: ts };
+    const dur = 500, t0 = performance.now();
 
-    const animate = () => {
+    const anim = () => {
       const t = Math.min(1, (performance.now() - t0) / dur);
-      const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
-      this.tx    = startTx + (endTx - startTx) * ease;
-      this.ty    = startTy + (endTy - startTy) * ease;
-      this.scale = startS  + (endS  - startS)  * ease;
-      if (t < 1) requestAnimationFrame(animate);
+      const e = t < 0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
+      this.tx = s0.tx + (s1.tx - s0.tx) * e;
+      this.ty = s0.ty + (s1.ty - s0.ty) * e;
+      this.scale = s0.s + (s1.s - s0.s) * e;
+      if (t < 1) requestAnimationFrame(anim);
     };
-    requestAnimationFrame(animate);
+    requestAnimationFrame(anim);
   }
 
-  /** 聚焦到最新对话节点 */
   focusLatest() {
-    const ids = new Set(this.nodes.filter(n => n.isLatest).map(n => n.id));
-    if (ids.size) this.focusNodes(ids);
+    const latest = this.nodes.filter(n => n.isLatest);
+    if (latest.length) this.focusNodes(new Set(latest.map(n => n.id)));
   }
 
-  /** 居中视图 */
   resetView() {
-    const ids = new Set(this.nodes.map(n => n.id));
-    this.focusNodes(ids);
+    this.focusNodes(new Set(this.nodes.map(n => n.id)));
   }
 
-  /** 获取某节点的连接节点 */
   getConnected(nodeId) {
-    const connected = [];
-    for (const l of this.links) {
-      if (l.source === nodeId) connected.push(this.nodeMap.get(l.target));
-      else if (l.target === nodeId) connected.push(this.nodeMap.get(l.source));
-    }
-    return connected.filter(Boolean);
+    return this.links
+      .filter(l => l.source === nodeId || l.target === nodeId)
+      .map(l => ({
+        node: this.nodeMap.get(l.source === nodeId ? l.target : l.source),
+        weight: l.weight,
+      }))
+      .filter(c => c.node)
+      .sort((a, b) => b.weight - a.weight);
   }
 }
 
@@ -431,18 +439,27 @@ class ForceGraph {
    Side Panel Controller
    ══════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
-  const canvas    = document.getElementById('graph-canvas');
-  const emptyEl   = document.getElementById('empty-state');
-  const statsEl   = document.getElementById('stats');
-  const drawerEl  = document.getElementById('detail-drawer');
+  const canvas      = document.getElementById('graph-canvas');
+  const emptyEl     = document.getElementById('empty-state');
+  const statsEl     = document.getElementById('stats');
+  const drawerEl    = document.getElementById('detail-drawer');
   const drawerTitle = document.getElementById('drawer-title');
   const drawerBody  = document.getElementById('drawer-body');
 
   const graph = new ForceGraph(canvas);
-
   let currentData = null;
 
-  /* ── Update graph with new data ── */
+  /* ── Navigate to Gemini turn ── */
+  function navigateToTurn(turnIndex) {
+    // 判断是否在扩展环境中
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_TURN', turnIndex });
+    }
+  }
+
+  graph.onNavigate = navigateToTurn;
+
+  /* ── Update graph ── */
   function updateGraph(data) {
     if (!data || !data.nodes.length) {
       emptyEl.classList.remove('hidden');
@@ -453,53 +470,57 @@ document.addEventListener('DOMContentLoaded', () => {
     currentData = data;
     graph.setData(data);
 
-    const latestCount = data.nodes.filter(n => n.isLatest).length;
-    statsEl.textContent =
-      `${data.nodes.length} 节点 · ${data.links.length} 关系 · ${data.totalTurns} 轮对话 · 最新 ${latestCount} 实体`;
-
-    // Auto-focus latest on first load
+    const platform = data.platform === 'qianwen' ? '千问' : (data.platform === 'gemini' ? 'Gemini' : '对话');
+    statsEl.textContent = `${platform} · ${data.totalTurns} 轮对话 · ${data.links.length} 条关联`;
     setTimeout(() => graph.focusLatest(), 600);
   }
 
   /* ── Detail drawer ── */
   graph.onSelect = (node) => {
-    if (!node) {
-      drawerEl.classList.remove('open');
-      return;
-    }
-    drawerTitle.textContent = node.label;
+    if (!node) { drawerEl.classList.remove('open'); return; }
+
+    drawerTitle.textContent = `Turn ${node.turnIndex + 1}`;
 
     const connected = graph.getConnected(node.id);
-    const turnTags  = node.turns.map(t => {
-      const isLast = currentData && t === currentData.latestTurnIndex;
-      return `<span class="tag ${isLast ? 'tag-latest' : 'tag-turn'}">Turn ${t + 1}${isLast ? ' (最新)' : ''}</span>`;
+    const connHTML = connected.slice(0, 8).map(c => {
+      const pct = Math.round(c.weight * 100);
+      return `<span class="tag tag-connected" data-id="${c.node.id}" data-turn="${c.node.turnIndex}">
+        Turn ${c.node.turnIndex + 1} <small style="opacity:.6">${pct}%</small>
+      </span>`;
     }).join('');
 
-    const connTags = connected.map(c =>
-      `<span class="tag tag-connected" data-id="${c.id}">${c.label}</span>`
-    ).join('');
+    const kwHTML = (node.keywords || []).map(k => `<span class="tag">${k}</span>`).join('');
 
     drawerBody.innerHTML = `
       <div class="drawer-section">
-        <div class="drawer-label">类型</div>
-        <span class="tag">${node.type}</span>
-        ${node.isLatest ? '<span class="tag tag-latest">最新对话</span>' : ''}
-        <span class="tag">出现 ${node.weight} 次</span>
+        <div class="drawer-label">用户提问</div>
+        <div class="drawer-text">${escHtml(node.fullUser || node.label)}</div>
       </div>
-      <div class="drawer-section">
-        <div class="drawer-label">出现轮次</div>
-        <div class="drawer-tags">${turnTags}</div>
-      </div>
-      ${connTags ? `
-      <div class="drawer-section">
-        <div class="drawer-label">关联实体 (${connected.length})</div>
-        <div class="drawer-tags">${connTags}</div>
+      ${node.fullModel ? `<div class="drawer-section">
+        <div class="drawer-label">模型回复摘要</div>
+        <div class="drawer-text">${escHtml(node.fullModel)}</div>
       </div>` : ''}
+      ${kwHTML ? `<div class="drawer-section">
+        <div class="drawer-label">关键词</div>
+        <div class="drawer-tags">${kwHTML}</div>
+      </div>` : ''}
+      ${connHTML ? `<div class="drawer-section">
+        <div class="drawer-label">关联对话 (按相似度排序)</div>
+        <div class="drawer-tags">${connHTML}</div>
+      </div>` : ''}
+      <div class="drawer-section" style="margin-top:8px">
+        <button class="nav-btn" id="btn-nav-turn">定位到原文 ↗</button>
+      </div>
     `;
 
     drawerEl.classList.add('open');
 
-    // Click connected tag → select that node
+    // 定位按钮
+    document.getElementById('btn-nav-turn')?.addEventListener('click', () => {
+      navigateToTurn(node.turnIndex);
+    });
+
+    // 关联节点可点击
     drawerBody.querySelectorAll('.tag-connected').forEach(el => {
       el.addEventListener('click', () => {
         const n = graph.nodeMap.get(el.dataset.id);
@@ -507,43 +528,37 @@ document.addEventListener('DOMContentLoaded', () => {
           graph.selected = n;
           graph.focusNodes(new Set([n.id]));
           graph.onSelect(n);
+          navigateToTurn(n.turnIndex);
         }
       });
     });
   };
 
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
   /* ── Buttons ── */
   document.getElementById('btn-refresh').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'REQUEST_EXTRACT' });
+    if (typeof chrome !== 'undefined' && chrome.runtime) {
+      chrome.runtime.sendMessage({ type: 'REQUEST_EXTRACT' });
+    }
   });
-
-  document.getElementById('btn-center').addEventListener('click', () => {
-    graph.resetView();
-  });
-
-  document.getElementById('btn-latest').addEventListener('click', () => {
-    graph.focusLatest();
-  });
-
+  document.getElementById('btn-center').addEventListener('click', () => graph.resetView());
+  document.getElementById('btn-latest').addEventListener('click', () => graph.focusLatest());
   document.getElementById('btn-close-drawer').addEventListener('click', () => {
     drawerEl.classList.remove('open');
     graph.selected = null;
   });
 
-  /* ── Message listeners ── */
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'GRAPH_UPDATE') {
-      updateGraph(msg.data);
-    }
-  });
-
-  // Request initial data
-  chrome.runtime.sendMessage({ type: 'GET_GRAPH_DATA' }, resp => {
-    if (resp?.data) updateGraph(resp.data);
-  });
-
-  // Also request fresh extraction
-  setTimeout(() => {
-    chrome.runtime.sendMessage({ type: 'REQUEST_EXTRACT' });
-  }, 500);
+  /* ── Chrome message listeners ── */
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg.type === 'GRAPH_UPDATE') updateGraph(msg.data);
+    });
+    chrome.runtime.sendMessage({ type: 'GET_GRAPH_DATA' }, resp => {
+      if (resp?.data) updateGraph(resp.data);
+    });
+    setTimeout(() => chrome.runtime.sendMessage({ type: 'REQUEST_EXTRACT' }), 500);
+  }
 });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gemini Knowledge Graph</title>
+  <title>Conversation Knowledge Graph</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
     <!-- Header -->
     <header class="header">
       <div class="header-left">
-        <h1 class="title">Knowledge Graph</h1>
+        <h1 class="title">Conversation Map</h1>
         <span class="subtitle" id="stats">等待提取对话...</span>
       </div>
       <div class="header-right">
@@ -37,10 +37,10 @@
 
     <!-- Legend -->
     <div class="legend">
+      <span class="legend-item"><span class="dot dot-turn"></span>对话轮次</span>
       <span class="legend-item"><span class="dot dot-latest"></span>最新对话</span>
-      <span class="legend-item"><span class="dot dot-concept"></span>概念</span>
-      <span class="legend-item"><span class="dot dot-entity"></span>实体</span>
-      <span class="legend-item"><span class="dot dot-tech"></span>技术术语</span>
+      <span class="legend-item"><span class="line line-strong"></span>强关联</span>
+      <span class="legend-item"><span class="line line-weak"></span>弱关联</span>
     </div>
 
     <!-- Graph Canvas -->
@@ -52,8 +52,9 @@
           <circle cx="18.5" cy="18.5" r="2.5"/><line x1="7.5" y1="10" x2="16" y2="6.5"/>
           <line x1="7.5" y1="13" x2="16" y2="17.5"/>
         </svg>
-        <p>打开 Gemini 对话页面</p>
-        <p class="sub">插件将自动提取对话内容并生成知识图谱</p>
+        <p>打开 Gemini 或通义千问对话页面</p>
+        <p class="sub">插件将自动提取对话内容并生成关联图谱</p>
+        <p class="sub">每个节点代表一轮对话，点击可定位原文</p>
       </div>
     </div>
 
