@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Knowledge Graph",
+  "version": "1.0.0",
+  "description": "将 Gemini 对话实时可视化为知识图谱，力导向图展示概念与关系",
+  "permissions": ["sidePanel", "activeTab", "storage"],
+  "host_permissions": ["https://gemini.google.com/*"],
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Gemini Knowledge Graph",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
