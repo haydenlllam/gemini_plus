@@ -11,18 +11,15 @@
    Color palette
    ══════════════════════════════════════ */
 const COLORS = {
-  node:       '#3b82f6',
-  nodeHover:  '#2563eb',
-  latest:     { fill: '#f59e0b', glow: '#f59e0b30', ring: '#f59e0b' },
+  node:       '#4dc9f6',
+  nodeHover:  '#29b6f0',
+  latest:     { fill: '#f6c34d', glow: 'rgba(246,195,77,0.12)', ring: '#f6c34d' },
   selected:   '#1e293b',
-  linkWeak:   '#cbd5e1',
-  linkMed:    '#94a3b8',
-  linkStrong: '#3b82f6',
-  linkAdj:    '#94a3b8',
-  text:       '#1e293b',
+  linkDefault:'#DCDCDC',
+  linkHL:     '#BFBFBF',
+  linkAdj:    '#DCDCDC',
+  text:       '#334155',
   textDim:    '#64748b',
-  turnBadge:  '#ffffff',
-  turnText:   '#64748b',
 };
 
 /* ══════════════════════════════════════
@@ -273,89 +270,78 @@ class ForceGraph {
   _render() {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.W, this.H);
+    // Fill canvas background
+    ctx.fillStyle = '#FBF9F8';
+    ctx.fillRect(0, 0, this.W, this.H);
     ctx.save();
     ctx.translate(this.W / 2 + this.tx, this.H / 2 + this.ty);
     ctx.scale(this.scale, this.scale);
 
-    const pulse = 0.5 + 0.5 * Math.sin(this._tick * 0.04);
-
-    // ── Links ──
+    // ── Links (curved arcs) ──
     for (const l of this.links) {
       const s = l.sourceNode, t = l.targetNode;
       const isHL = this.selected && (s.id === this.selected.id || t.id === this.selected.id);
-      const w = l.weight;
+
+      // Compute curve control point (perpendicular offset)
+      const mx = (s.x + t.x) / 2;
+      const my = (s.y + t.y) / 2;
+      const dx = t.x - s.x, dy = t.y - s.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const curvature = 0.2 + l.weight * 0.15;
+      const cpx = mx + (-dy / dist) * dist * curvature;
+      const cpy = my + (dx / dist) * dist * curvature;
 
       ctx.beginPath();
       ctx.moveTo(s.x, s.y);
-      ctx.lineTo(t.x, t.y);
+      ctx.quadraticCurveTo(cpx, cpy, t.x, t.y);
 
       if (isHL) {
-        ctx.strokeStyle = lerpColor(Math.min(w * 2, 1));
-        ctx.lineWidth = 1.5 + w * 3;
-        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = COLORS.linkHL;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.7;
       } else {
-        ctx.strokeStyle = l.isAdjacent ? COLORS.linkAdj : lerpColor(w);
-        ctx.lineWidth = l.isAdjacent ? 1 : (0.8 + w * 3);
-        ctx.globalAlpha = l.isAdjacent ? 0.5 : (0.4 + w * 0.5);
+        ctx.strokeStyle = COLORS.linkDefault;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
       }
-      if (l.isAdjacent && !isHL) ctx.setLineDash([4, 4]);
       ctx.stroke();
-      ctx.setLineDash([]);
     }
     ctx.globalAlpha = 1;
 
-    // ── Nodes ──
+    // ── Nodes (clean dots) ──
     for (const n of this.nodes) {
       const isHov = this.hovered === n;
       const isSel = this.selected === n;
-
-      // Latest glow
-      if (n.isLatest) {
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r + 6 + pulse * 4, 0, Math.PI * 2);
-        ctx.fillStyle = COLORS.latest.glow;
-        ctx.fill();
-      }
+      const r = n.r * 0.6;  // smaller, cleaner dots
 
       // Selection ring
       if (isSel) {
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, r + 4, 0, Math.PI * 2);
         ctx.strokeStyle = COLORS.selected;
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.3;
         ctx.stroke();
+        ctx.globalAlpha = 1;
       }
 
-      // Main circle
+      // Main circle — solid color, no inner text
       ctx.beginPath();
-      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
       ctx.fillStyle = n.isLatest ? COLORS.latest.fill : (isHov ? COLORS.nodeHover : COLORS.node);
       ctx.fill();
 
-      if (n.isLatest) {
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r + 1, 0, Math.PI * 2);
-        ctx.strokeStyle = COLORS.latest.ring;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-
-      // Turn number badge inside circle
-      ctx.font = `700 ${Math.max(9, n.r * 0.65)}px system-ui, -apple-system, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(`${n.turnIndex + 1}`, n.x, n.y);
-
       // Label below: user question preview
-      const fontSize = 11;
-      const lineGap = 3;
-      ctx.font = `500 ${fontSize}px system-ui, -apple-system, sans-serif`;
-      ctx.fillStyle = n.isLatest || isSel || isHov ? COLORS.text : COLORS.textDim;
+      const fontSize = 13;
+      const lineGap = 4;
+      ctx.font = `400 ${fontSize}px system-ui, -apple-system, 'PingFang SC', sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = isSel || isHov ? COLORS.text : COLORS.textDim;
 
-      const maxLabelWidth = 160;
+      const maxLabelWidth = 180;
       const lines = wrapText(ctx, n.label, maxLabelWidth, 2);
-      const baseY = n.y + n.r + fontSize + 4;
+      const baseY = n.y + r + 8;
       for (let li = 0; li < lines.length; li++) {
         ctx.fillText(lines[li], n.x, baseY + li * (fontSize + lineGap));
       }
@@ -557,66 +543,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const platform = data.platform === 'qianwen' ? '千问' : (data.platform === 'gemini' ? 'Gemini' : '对话');
     statsEl.textContent = `${platform} · ${data.totalTurns} 轮对话 · ${data.links.length} 条关联`;
-    setTimeout(() => graph.focusLatest(), 600);
+    setTimeout(() => graph.resetView(), 600);
   }
 
-  /* ── Detail drawer ── */
+  /* ── Node select: navigate directly, no drawer ── */
   graph.onSelect = (node) => {
-    if (!node) { drawerEl.classList.remove('open'); return; }
-
-    drawerTitle.textContent = `Turn ${node.turnIndex + 1}`;
-
-    const connected = graph.getConnected(node.id);
-    const connHTML = connected.slice(0, 8).map(c => {
-      const pct = Math.round(c.weight * 100);
-      return `<span class="tag tag-connected" data-id="${c.node.id}" data-turn="${c.node.turnIndex}">
-        Turn ${c.node.turnIndex + 1} <small style="opacity:.6">${pct}%</small>
-      </span>`;
-    }).join('');
-
-    const kwHTML = (node.keywords || []).map(k => `<span class="tag">${k}</span>`).join('');
-
-    drawerBody.innerHTML = `
-      <div class="drawer-section">
-        <div class="drawer-label">用户提问</div>
-        <div class="drawer-text">${escHtml(node.fullUser || node.label)}</div>
-      </div>
-      ${node.fullModel ? `<div class="drawer-section">
-        <div class="drawer-label">模型回复摘要</div>
-        <div class="drawer-text">${escHtml(node.fullModel)}</div>
-      </div>` : ''}
-      ${kwHTML ? `<div class="drawer-section">
-        <div class="drawer-label">关键词</div>
-        <div class="drawer-tags">${kwHTML}</div>
-      </div>` : ''}
-      ${connHTML ? `<div class="drawer-section">
-        <div class="drawer-label">关联对话 (按相似度排序)</div>
-        <div class="drawer-tags">${connHTML}</div>
-      </div>` : ''}
-      <div class="drawer-section" style="margin-top:8px">
-        <button class="nav-btn" id="btn-nav-turn">定位到原文 ↗</button>
-      </div>
-    `;
-
-    drawerEl.classList.add('open');
-
-    // 定位按钮
-    document.getElementById('btn-nav-turn')?.addEventListener('click', () => {
-      navigateToTurn(node.turnIndex);
-    });
-
-    // 关联节点可点击
-    drawerBody.querySelectorAll('.tag-connected').forEach(el => {
-      el.addEventListener('click', () => {
-        const n = graph.nodeMap.get(el.dataset.id);
-        if (n) {
-          graph.selected = n;
-          graph.focusNodes(new Set([n.id]));
-          graph.onSelect(n);
-          navigateToTurn(n.turnIndex);
-        }
-      });
-    });
+    if (!node) return;
+    // 直接导航到对应对话位置，不弹出浮窗
+    navigateToTurn(node.turnIndex);
   };
 
   function escHtml(s) {

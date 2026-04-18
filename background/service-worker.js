@@ -31,19 +31,32 @@ class NLPEngine {
       .trim();
   }
 
-  /** 分词：返回词频 Map */
+  /** 分词：返回词频 Map（滑动窗口 n-gram） */
   tokenize(text) {
     const freq = new Map();
     const add = (w) => { freq.set(w, (freq.get(w) || 0) + 1); };
 
-    // 中文 2~6 字
-    for (const m of text.matchAll(/[\u4e00-\u9fff\u3400-\u4dbf]{2,6}/g)) {
-      if (!this.stopZH.has(m[0])) add(m[0]);
+    // 中文：提取连续汉字段，滑动窗口生成 2~4 字 n-gram
+    for (const m of text.matchAll(/[\u4e00-\u9fff\u3400-\u4dbf]+/g)) {
+      const seg = m[0];
+      for (let n = 2; n <= Math.min(4, seg.length); n++) {
+        for (let i = 0; i <= seg.length - n; i++) {
+          const gram = seg.slice(i, i + n);
+          if (!this.stopZH.has(gram)) add(gram);
+        }
+      }
     }
-    // 英文
+    // 英文：完整词 + 驼峰/连字符拆分子词
     for (const m of text.matchAll(/[A-Za-z][A-Za-z0-9_.-]{1,30}/g)) {
       const w = m[0].toLowerCase();
       if (w.length >= 2 && !this.stopEN.has(w)) add(w);
+      const parts = m[0].split(/(?=[A-Z][a-z])|[-_.]/).filter(p => p.length >= 2);
+      if (parts.length > 1) {
+        for (const p of parts) {
+          const lp = p.toLowerCase();
+          if (!this.stopEN.has(lp)) add(lp);
+        }
+      }
     }
     return freq;
   }
@@ -137,7 +150,7 @@ class NLPEngine {
 
     // 4. 计算所有对话对之间的相似度，保留有意义的边
     const links = [];
-    const SIM_THRESHOLD = 0.05;  // 最低关联阈值
+    const SIM_THRESHOLD = 0.03;  // 最低关联阈值
 
     for (let i = 0; i < turns.length; i++) {
       for (let j = i + 1; j < turns.length; j++) {
@@ -161,7 +174,99 @@ class NLPEngine {
       }
     }
 
-    return { nodes, links, totalTurns: turns.length };
+    // 6. 聚类分组
+    this.clusterNodes(nodes, links);
+    const clusters = this.generateClusterLabels(nodes);
+
+    return { nodes, links, totalTurns: turns.length, clusters };
+  }
+
+  /* ══════════════════════════════════
+     图聚类：简化 Louvain 社区检测
+     基于边权重贪心合并
+     ══════════════════════════════════ */
+  clusterNodes(nodes, links) {
+    if (!nodes.length) return 0;
+
+    // 初始化：每个节点自成一簇
+    const cluster = new Map();
+    nodes.forEach((n, i) => cluster.set(n.id, i));
+
+    // 构建邻接表（带权重）
+    const adj = new Map();
+    nodes.forEach(n => adj.set(n.id, []));
+    links.forEach(l => {
+      if (adj.has(l.source) && adj.has(l.target)) {
+        adj.get(l.source).push({ target: l.target, weight: l.weight });
+        adj.get(l.target).push({ target: l.source, weight: l.weight });
+      }
+    });
+
+    // 贪心迭代：将每个节点移到权重最大的邻居簇
+    let changed = true;
+    let iterations = 0;
+    while (changed && iterations < 10) {
+      changed = false;
+      iterations++;
+      for (const n of nodes) {
+        const neighbors = adj.get(n.id);
+        if (!neighbors || !neighbors.length) continue;
+
+        const clusterWeights = new Map();
+        for (const { target, weight } of neighbors) {
+          const c = cluster.get(target);
+          clusterWeights.set(c, (clusterWeights.get(c) || 0) + weight);
+        }
+
+        let bestCluster = cluster.get(n.id);
+        let bestWeight = 0;
+        for (const [c, w] of clusterWeights) {
+          if (w > bestWeight) { bestWeight = w; bestCluster = c; }
+        }
+
+        if (bestCluster !== cluster.get(n.id)) {
+          cluster.set(n.id, bestCluster);
+          changed = true;
+        }
+      }
+    }
+
+    // 归一化簇 ID
+    const uniqueClusters = [...new Set(cluster.values())];
+    const clusterMap = new Map();
+    uniqueClusters.forEach((c, i) => clusterMap.set(c, i));
+    nodes.forEach(n => { n.clusterId = clusterMap.get(cluster.get(n.id)); });
+
+    return uniqueClusters.length;
+  }
+
+  /* 生成簇标签：取每个簇所有节点的高频关键词 top2 */
+  generateClusterLabels(nodes) {
+    const clusters = new Map();
+    nodes.forEach(n => {
+      if (!clusters.has(n.clusterId)) clusters.set(n.clusterId, []);
+      clusters.get(n.clusterId).push(n);
+    });
+
+    const labels = [];
+    for (const [id, members] of clusters) {
+      const kwFreq = new Map();
+      members.forEach(m => {
+        (m.keywords || []).forEach(k => {
+          kwFreq.set(k, (kwFreq.get(k) || 0) + 1);
+        });
+      });
+      const topKw = [...kwFreq.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 2)
+        .map(e => e[0]);
+      labels.push({
+        id,
+        label: topKw.join(' · ') || `主题 ${id + 1}`,
+        count: members.length,
+      });
+    }
+    return labels;
   }
 }
 

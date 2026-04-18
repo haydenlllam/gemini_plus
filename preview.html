@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Conversation Knowledge Graph — Preview</title>
+  <link rel="stylesheet" href="sidepanel/style.css">
+  <style>
+    body {
+      background: #f1f5f9;
+      display: flex;
+      justify-content: center;
+      align-items: stretch;
+      height: 100vh;
+      margin: 0;
+      gap: 0;
+    }
+    .preview-sidebar {
+      width: 420px;
+      min-width: 360px;
+      max-width: 480px;
+      height: 100vh;
+      box-shadow: -4px 0 20px rgba(0,0,0,0.08);
+      position: relative;
+      overflow: hidden;
+    }
+    .mock-page {
+      flex: 1;
+      background: #f8fafc;
+      color: #1e293b;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow-y: auto;
+      padding: 32px 48px;
+    }
+    .mock-page h2 {
+      font-size: 20px;
+      color: #4f46e5;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .mock-page h2::before {
+      content: '';
+      display: inline-block;
+      width: 8px; height: 8px;
+      background: #4f46e5;
+      border-radius: 50%;
+      box-shadow: 0 0 6px rgba(79,70,229,0.4);
+    }
+    .mock-turn {
+      margin-bottom: 20px;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .mock-user {
+      background: #eef2ff;
+      padding: 14px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #3730a3;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .mock-model {
+      background: #ffffff;
+      padding: 14px 20px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #475569;
+    }
+    .highlight-turn {
+      outline: 2px solid #f59e0b !important;
+      outline-offset: 4px;
+      border-radius: 12px;
+      transition: outline 0.3s;
+    }
+    .mock-badge {
+      display: inline-block;
+      background: #eef2ff;
+      color: #4f46e5;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="mock-page" id="mock-page">
+    <h2>Gemini 对话模拟</h2>
+    <div class="mock-badge">gemini.google.com — 模拟对话 10 轮</div>
+    <div id="mock-turns"></div>
+  </div>
+  <div class="preview-sidebar">
+    <div class="panel">
+      <header class="header">
+        <div class="header-left">
+          <h1 class="title">Conversation Map</h1>
+          <span class="subtitle" id="stats">等待提取对话...</span>
+        </div>
+        <div class="header-right">
+          <button id="btn-refresh" class="btn" title="刷新">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+              <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+            </svg>
+          </button>
+          <button id="btn-center" class="btn" title="居中全部">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/>
+            </svg>
+          </button>
+          <button id="btn-latest" class="btn btn-accent" title="聚焦最新对话">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div class="legend">
+        <span class="legend-item"><span class="dot dot-turn"></span>对话轮次</span>
+        <span class="legend-item"><span class="dot dot-latest"></span>最新对话</span>
+        <span class="legend-item"><span class="line line-strong"></span>强关联</span>
+        <span class="legend-item"><span class="line line-weak"></span>弱关联</span>
+      </div>
+      <div class="graph-container" id="graph-container">
+        <canvas id="graph-canvas"></canvas>
+        <div class="empty-state hidden" id="empty-state">
+          <p>打开 Gemini 或通义千问对话页面</p>
+        </div>
+      </div>
+      <div class="detail-drawer" id="detail-drawer">
+        <div class="drawer-header">
+          <span class="drawer-title" id="drawer-title"></span>
+          <button class="btn btn-small" id="btn-close-drawer">&times;</button>
+        </div>
+        <div class="drawer-body" id="drawer-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var MOCK_TURNS = [
+      { user: "帮我解释一下什么是 Transformer 架构？它在深度学习中有什么作用？", model: "Transformer 是一种基于自注意力机制的神经网络架构，由 Google 在 2017 年论文 Attention Is All You Need 中提出。它摒弃了传统的 RNN 和 CNN，完全使用注意力机制来处理序列数据。核心组件包括：多头注意力机制、前馈网络、位置编码和层归一化。Transformer 极大推动了 NLP 领域的发展，催生了 BERT、GPT 等模型。" },
+      { user: "Transformer 中的自注意力机制是如何工作的？请用一个简单的例子说明", model: "自注意力机制通过 Query、Key、Value 三个矩阵来计算每个位置与其他位置的关联权重。公式为：Attention(Q,K,V) = softmax(QK^T / sqrt(d_k))V。处理每个词时，模型会计算它与句中每个词的相关性分数，从而捕捉长距离依赖关系。" },
+      { user: "BERT 和 GPT 有什么区别？哪个更适合做文本分类任务？", model: "BERT 使用 Transformer 的编码器部分，采用双向预训练；GPT 使用解码器部分，采用单向自回归预训练。对于文本分类任务，BERT 通常更优，因为它能同时考虑上下文信息。GPT 更擅长文本生成任务。不过 GPT-3/4 通过 few-shot 学习也能在分类任务上表现出色。" },
+      { user: "如何用 Python 实现一个简单的注意力机制？", model: "可以用 PyTorch 实现 Scaled Dot-Product Attention：定义 attention(Q, K, V) 函数，计算 scores = QK^T / sqrt(d_k)，然后 softmax 归一化得到权重，最后与 V 相乘得到输出。这个函数接受 Query、Key、Value 张量，返回注意力输出和权重矩阵。" },
+      { user: "大语言模型（LLM）的微调方法有哪些？LoRA 是什么原理？", model: "主要微调方法包括：全量微调、冻结层微调、Adapter、Prefix Tuning、LoRA 和 QLoRA。LoRA（Low-Rank Adaptation）的核心思想是：冻结预训练权重，在每个 Transformer 层旁插入低秩分解矩阵 A 和 B。原始权重 W 不变，实际计算 W + BA，其中 BA 的秩远小于 W。" },
+      { user: "RAG（检索增强生成）是怎么工作的？和直接用 LLM 有什么区别？", model: "RAG 将信息检索与 LLM 生成相结合。工作流程：用户提问后将问题转为向量，在知识库中检索相关文档，将检索到的文档片段作为上下文拼接到 prompt 中，LLM 基于上下文生成回答。RAG 可以访问最新数据、减少幻觉、支持引用来源。" },
+      { user: "向量数据库有哪些？Pinecone 和 Milvus 怎么选？", model: "主流向量数据库包括：Pinecone（全托管 SaaS）、Milvus（开源，分布式）、Weaviate（开源，支持多模态）、Qdrant（Rust 编写，高性能）、Chroma（轻量级，适合原型开发）。Pinecone 适合快速上线；Milvus 适合私有部署和企业级应用。" },
+      { user: "如何评估 LLM 的输出质量？有哪些常用的评估指标？", model: "LLM 评估指标分为自动指标和人工评估。自动指标：BLEU、ROUGE、Perplexity、BERTScore、METEOR。专项评估：TruthfulQA、HumanEval、MMLU、HellaSwag。人工评估维度：准确性、相关性、流畅性、安全性、有用性。" },
+      { user: "Prompt Engineering 有什么技巧？如何写出更好的提示词？", model: "核心技巧包括：角色设定、任务明确、Few-shot 示例、Chain-of-Thought 逐步思考、约束条件、分隔符标记、迭代优化。进阶技巧：Tree-of-Thought、Self-Consistency、ReAct 范式（推理+行动结合）。" },
+      { user: "AI Agent 和传统的 LLM 应用有什么区别？AutoGPT 这类项目可靠吗？", model: "AI Agent 的核心区别在于具备自主决策和工具调用能力。Agent 具有：目标分解（Planning）、工具使用（Tool Use）、记忆管理（Memory）、自我反思（Reflection）。AutoGPT 等早期 Agent 存在目标漂移和可靠性不足等问题。当前更可靠的方案是 LangChain Agent、CrewAI、AutoGen 等框架。" }
+    ];
+
+    // Render mock conversation
+    var mockTurnsEl = document.getElementById('mock-turns');
+    MOCK_TURNS.forEach(function(t, i) {
+      var div = document.createElement('div');
+      div.className = 'mock-turn';
+      div.id = 'turn-el-' + i;
+      div.innerHTML = '<div class="mock-user">' + t.user + '</div><div class="mock-model">' + t.model + '</div>';
+      mockTurnsEl.appendChild(div);
+    });
+
+    // Mock Chrome Extension APIs
+    var messageListeners = [];
+    window.chrome = {
+      runtime: {
+        onMessage: { addListener: function(fn) { messageListeners.push(fn); } },
+        sendMessage: function(msg, cb) {
+          if (msg.type === 'NAVIGATE_TO_TURN') {
+            var el = document.getElementById('turn-el-' + msg.turnIndex);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.classList.add('highlight-turn');
+              setTimeout(function() { el.classList.remove('highlight-turn'); }, 1500);
+            }
+          }
+          if (msg.type === 'REQUEST_EXTRACT') { setTimeout(function() { injectMockData(); }, 300); }
+          if (msg.type === 'GET_GRAPH_DATA') { if (cb) cb({ data: null }); }
+        },
+        lastError: null
+      },
+      sidePanel: { setPanelBehavior: function() {} },
+      tabs: { query: function(q, cb) { cb([]); } }
+    };
+
+    // Inline NLP Engine
+    function NLPEngine() {
+      this.stopZH = new Set(('的了在是我有和就不人都一一个上也很到说要去你会着没有看好自己这他她么那被把以而等但对又还能可以这个那个什么如果因为所以但是或者以及通过进行可能需要已经其中关于之间这些那些它们我们他们比较然后或及与为中从用来个里面虽然只是更多所有使用当然还是更加比如想要无法根据其实一下一些怎么正在不是了解目前提供支持那么如何现在成为主要包括也是以后具有方面同时').match(/.{1,4}/g) || []);
+      this.stopEN = new Set('the a an is are was were be been being have has had do does did will would could should may might can shall to of in for on with at by from as into about through between after before it its this that these those i you he she we they me him her us them my your his our their and or but not if then so than too very just also more some any each every all both few most other new old what which who when where why how there here no yes up out one two first last next only own same such like get got make made know think want see look use used using please help me tell explain describe compare'.split(' '));
+    }
+    NLPEngine.prototype.tokenize = function(text) {
+      var freq = new Map(); var self = this;
+      var add = function(w) { freq.set(w, (freq.get(w) || 0) + 1); };
+      // 中文：滑动窗口 n-gram（2~4字）
+      (text.match(/[\u4e00-\u9fff]+/g) || []).forEach(function(seg) {
+        for (var n = 2; n <= Math.min(4, seg.length); n++) {
+          for (var i = 0; i <= seg.length - n; i++) {
+            var gram = seg.slice(i, i + n);
+            if (!self.stopZH.has(gram)) add(gram);
+          }
+        }
+      });
+      // 英文：完整词 + 驼峰子词
+      (text.match(/[A-Za-z][A-Za-z0-9_.-]{1,30}/g) || []).forEach(function(m) {
+        var w = m.toLowerCase();
+        if (w.length >= 2 && !self.stopEN.has(w)) add(w);
+        var parts = m.split(/(?=[A-Z][a-z])|[-_.]/).filter(function(p){return p.length>=2;});
+        if (parts.length > 1) {
+          parts.forEach(function(p) { var lp = p.toLowerCase(); if (!self.stopEN.has(lp)) add(lp); });
+        }
+      });
+      return freq;
+    };
+    NLPEngine.prototype.topKeywords = function(text, n) { n = n || 5; var freq = this.tokenize(text); return Array.from(freq.entries()).sort(function(a,b){return b[1]-a[1];}).slice(0,n).map(function(e){return e[0];}); };
+    NLPEngine.prototype.computeTFIDF = function(docs) { var N = docs.length; var df = new Map(); docs.forEach(function(d){d.forEach(function(v,w){df.set(w,(df.get(w)||0)+1);});}); return docs.map(function(d){ var vec = new Map(); var total = 0; d.forEach(function(v){total+=v;}); total = total||1; d.forEach(function(c,w){vec.set(w,(c/total)*Math.log(N/(1+(df.get(w)||0))));}); return vec; }); };
+    NLPEngine.prototype.cosine = function(a,b) { var dot=0,ma=0,mb=0; a.forEach(function(v,w){ma+=v*v;var bv=b.get(w);if(bv!==undefined)dot+=v*bv;}); b.forEach(function(v){mb+=v*v;}); var d=Math.sqrt(ma)*Math.sqrt(mb); return d===0?0:dot/d; };
+    NLPEngine.prototype.buildGraph = function(turns) {
+      if (!turns.length) return {nodes:[],links:[],totalTurns:0};
+      var self = this;
+      var docs = turns.map(function(t){return self.tokenize([t.user,t.model,t.thought||''].join(' '));});
+      var tfidf = this.computeTFIDF(docs);
+      var latestIdx = turns.length - 1;
+      var nodes = turns.map(function(t,i){
+        var label = t.user.length > 40 ? t.user.slice(0,38)+'\u2026' : (t.user||'Turn '+(i+1));
+        return { id:'turn-'+i, turnIndex:i, label:label, fullUser:t.user, fullModel:t.model.slice(0,300), keywords:self.topKeywords([t.user,t.model].join(' '),5), wordCount:(t.user.length||0)+(t.model.length||0), isLatest:i===latestIdx };
+      });
+      var links = [];
+      for (var i=0;i<turns.length;i++) for (var j=i+1;j<turns.length;j++) { var sim=this.cosine(tfidf[i],tfidf[j]); if(sim>0.03) links.push({source:'turn-'+i,target:'turn-'+j,weight:sim,isAdjacent:j===i+1}); }
+      for (var k=0;k<turns.length-1;k++) { var s='turn-'+k,t='turn-'+(k+1); if(!links.find(function(l){return l.source===s&&l.target===t;})) links.push({source:s,target:t,weight:0.03,isAdjacent:true}); }
+      return {nodes:nodes,links:links,totalTurns:turns.length,clusters:clusters};
+    };
+
+    NLPEngine.prototype.clusterNodes = function(nodes, links) {
+      if (!nodes.length) return 0;
+      var cluster = new Map();
+      nodes.forEach(function(n,i){ cluster.set(n.id, i); });
+      var adj = new Map();
+      nodes.forEach(function(n){ adj.set(n.id, []); });
+      links.forEach(function(l){
+        if (adj.has(l.source) && adj.has(l.target)) {
+          adj.get(l.source).push({target:l.target,weight:l.weight});
+          adj.get(l.target).push({target:l.source,weight:l.weight});
+        }
+      });
+      var changed = true, iterations = 0;
+      while (changed && iterations < 10) {
+        changed = false; iterations++;
+        nodes.forEach(function(n){
+          var neighbors = adj.get(n.id);
+          if (!neighbors || !neighbors.length) return;
+          var cw = new Map();
+          neighbors.forEach(function(nb){ var c=cluster.get(nb.target); cw.set(c,(cw.get(c)||0)+nb.weight); });
+          var best = cluster.get(n.id), bestW = 0;
+          cw.forEach(function(w,c){ if(w>bestW){bestW=w;best=c;} });
+          if (best !== cluster.get(n.id)) { cluster.set(n.id, best); changed = true; }
+        });
+      }
+      var unique = Array.from(new Set(cluster.values()));
+      var cmap = new Map(); unique.forEach(function(c,i){cmap.set(c,i);});
+      nodes.forEach(function(n){ n.clusterId = cmap.get(cluster.get(n.id)); });
+      return unique.length;
+    };
+
+    NLPEngine.prototype.generateClusterLabels = function(nodes) {
+      var clusters = new Map();
+      nodes.forEach(function(n){
+        if (!clusters.has(n.clusterId)) clusters.set(n.clusterId, []);
+        clusters.get(n.clusterId).push(n);
+      });
+      var labels = [];
+      clusters.forEach(function(members, id){
+        var kwFreq = new Map();
+        members.forEach(function(m){ (m.keywords||[]).forEach(function(k){ kwFreq.set(k,(kwFreq.get(k)||0)+1); }); });
+        var topKw = Array.from(kwFreq.entries()).sort(function(a,b){return b[1]-a[1];}).slice(0,2).map(function(e){return e[0];});
+        labels.push({id:id, label:topKw.join(' \u00b7 ')||('\u4e3b\u9898 '+(id+1)), count:members.length});
+      });
+      return labels;
+    };
+
+    var nlp = new NLPEngine();
+    function injectMockData() {
+      var turns = MOCK_TURNS.map(function(t,i){return {index:i,user:t.user,model:t.model,thought:''};});
+      var graphData = nlp.buildGraph(turns);
+      graphData.platform = 'gemini';
+      graphData.url = 'https://gemini.google.com/app/mock-preview';
+      messageListeners.forEach(function(fn){ fn({type:'GRAPH_UPDATE',data:graphData}); });
+    }
+  </script>
+  <script src="sidepanel/graph.js"></script>
+  <script>setTimeout(function(){injectMockData();},800);</script>
+</body>
+</html>

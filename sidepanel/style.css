@@ -5,8 +5,8 @@
   --border:   #e2e8f0;
   --text:     #1e293b;
   --text-dim: #64748b;
-  --accent:   #3b82f6;
-  --latest:   #f59e0b;
+  --accent:   #4dc9f6;
+  --latest:   #f6c34d;
   --link-clr: #94a3b8;
   --radius:   6px;
   --font:     system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -59,8 +59,8 @@ body {
 .dot-turn   { background: var(--accent); }
 .dot-latest { background: var(--latest); box-shadow: 0 0 4px var(--latest); }
 .line { width: 20px; height: 2px; border-radius: 1px; }
-.line-strong { background: var(--accent); }
-.line-weak   { background: var(--border); }
+.line-strong { background: #BFBFBF; }
+.line-weak   { background: #DCDCDC; }
 
 /* ── Graph ── */
 .graph-container { flex: 1; position: relative; overflow: hidden; }
